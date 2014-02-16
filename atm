@@ -1,0 +1,228 @@
+#!/usr/bin/python
+
+'''
+Created on 2014-02-02
+
+@author: Francis Giraldeau <francis.giraldeau@gmail.com>
+
+
+'''
+
+import argparse
+import os
+import sys
+import unittest
+
+# real is the path from the backup
+# virt is the relative path of this file
+class Entry(object):
+    def __init__(self, real, virt):
+        self.real = real
+        self.virt = virt
+    def __str__(self):
+        return "[%s, %s]" % (self.real, self.virt)
+
+class BackupTraversal(object):
+    def __init__(self):
+        pass
+    def handle_file(self, src, dst):
+        pass
+    def handle_fir(self, src, dst):
+        pass
+
+class ShowBackup(BackupTraversal):
+    def __init__(self):
+        pass
+    def handle_file(self, src, dst):
+        print "f %s -> %s" % (repr(src), repr(dst)) 
+    def handle_dir(self, src, dst):
+        print "d %s -> %s" % (repr(src), repr(dst))
+
+class RestoreBackup(BackupTraversal):
+    def __init__(self):
+        pass
+    def handle_file(self, src, dst):
+        pass
+    def handle_dir(self, src, dst):
+        pass
+
+class ATM(object):
+    datadir = ".HFS+ Private Directory Data\r"
+
+    def __init__(self):
+        pass
+    def _find_datadir(self, base):
+        # rewind directory until finding datadir
+        lookup = base
+        if (os.path.isfile(lookup)):
+            lookup = os.path.dirname(lookup)
+        atm = None
+        while(lookup != "/" or not os.path.isdir(lookup)):
+            lst = os.listdir(lookup)
+            for l in lst:
+                d = os.path.join(lookup, l)
+                if (os.path.isdir(d) and l == ATM.datadir):
+                    atm = d
+                    break
+            lookup = os.path.dirname(lookup)
+        return atm
+    def do_walk(self, base, handler):
+        base = os.path.abspath(base)
+        atm = self._find_datadir(base)
+        if atm is None:
+            raise FileNotFoundError("Apple Time Machine directory not found")
+        # /media/francis/LaCie/.HFS+ /media/francis/LaCie/Backup/Mac/Latest/HD/some/dir
+        queue = [Entry(base, "")]
+        while(len(queue) != 0):
+            entry = queue.pop()
+            if not os.path.isdir(entry.real):
+                print "no files here: %s " % repr(entry.real)
+                continue
+            for item in os.listdir(entry.real):
+                if (item == self.datadir):
+                    print "skipping %s" % repr(item)
+                    continue
+                virtpath = os.path.join(entry.virt, item) 
+                realpath = os.path.join(entry.real, item)
+                #print path
+                # handle files
+                if (os.path.isfile(realpath)):
+                    statinfo = os.stat(realpath)
+                    # if the file is empty, may be subdirectory in backup
+                    if (statinfo.st_size == 0):
+                        lnkdir = "dir_%d" % (statinfo.st_nlink)
+                        newreal = os.path.join(atm, lnkdir)
+                        if os.path.exists(newreal):
+                            e = Entry(newreal, virtpath)
+                            queue.insert(0, e)
+                        else:
+                            handler.handle_file(realpath, virtpath)
+                    else:
+                        handler.handle_file(realpath, virtpath)
+                # handle directories
+                if (os.path.isdir(realpath)):
+                    e = Entry(realpath, virtpath)
+                    queue.insert(0, e)
+                    handler.handle_dir(realpath, virtpath)
+
+def run_restore(args):
+    print "restore"
+
+def rm(path, dry=False, verbose=False):
+    for root, dirs, files in os.walk(path, topdown=False):
+        for name in files:
+            file = os.path.join(root, name)
+            if verbose:
+                print repr(file)
+            if not dry:
+                os.remove(file)
+        for name in dirs:
+            dir = os.path.join(root, name)
+            if verbose:
+                print repr(dir)
+            if not dry:
+                os.rmdir(dir)
+
+class BackupCounter(object):
+    def __init__(self):
+        self.files = []
+        self.dirs = []
+    def handle_file(self, src, dst):
+        self.files.append(dst)
+    def handle_dir(self, src, dst):
+        self.dirs.append(dst)
+
+class TestRestore(unittest.TestCase):
+    root = "root"
+    bidon = "bidon"
+    def setUp(self):
+        bidon = TestRestore.bidon
+        self.atm = os.path.join(TestRestore.root, ATM.datadir)
+        if not os.path.isdir(self.atm):
+            os.makedirs(self.atm)
+        if not os.path.isdir(TestRestore.bidon):
+            os.makedirs(TestRestore.bidon)
+        # simple file
+        f1 = os.path.join(TestRestore.root, "backup/file_nonempty_0")
+        self._create_file(f1, "blah")
+
+        # simple directory
+        d0 = os.path.join(TestRestore.root, "backup/some/direct/dirs")
+        if not os.path.isdir(d0):
+            os.makedirs(d0)
+        
+        # empty file that does not have an indirect directory
+        self._create_file(os.path.join(d0, "file_empty"), "")
+                
+        # indirect directory
+        e0 = os.path.join(TestRestore.root, "backup/file_bkpdir_0")
+        self._create_file(e0, "")
+        self._increment_link_count(e0, 2, os.path.join(bidon, "bidon1")) 
+        dir_e0 = self._create_bkpdir(e0)
+        
+        # a file inside the indirect directory
+        self._create_file(os.path.join(dir_e0, "file_nonempty_1"), "blah")
+        
+        # a recursive indirect directory
+        e1 = os.path.join(dir_e0, "file_bkpdir_1")
+        self._create_file(e1, "")
+        self._increment_link_count(e1, 3, os.path.join(bidon, "bidon2"))
+        dir_e1 = self._create_bkpdir(e1)
+        
+        # a file inside the recursive indirect directory 
+        f3 = os.path.join(dir_e1, "file_nonempty_2")
+        self._create_file(f3, "blah")
+
+    def _increment_link_count(self, path, count, name):
+        for i in range(count):
+            f = "%s-%d" % (name, i)
+            if (os.path.exists(f)):
+                os.unlink(f)
+            os.link(path, f)
+        
+    def _create_bkpdir(self, path):
+        n = os.stat(path).st_nlink
+        dir = os.path.join(self.atm, "dir_%d" % n)
+        if not os.path.isdir(dir):
+            os.makedirs(dir)
+        return dir
+    
+    def _create_file(self, path, cont):
+        d = os.path.dirname(path)
+        if not os.path.isdir(d):
+            os.makedirs(d)
+        f = open(os.path.join(path), "w")
+        f.write(cont)
+        f.close()
+        
+    def test_walk(self):
+        a = ATM()
+        bc = BackupCounter()
+        a.do_walk(os.path.join(self.root, "backup"), bc)
+        self.assertEquals(4, len(bc.files))
+        self.assertEquals(3, len(bc.dirs))
+        
+    def tearDown(self):
+        rm(TestRestore.root)
+        rm(TestRestore.bidon)
+        
+def run_tests(args):
+    sys.argv = [sys.argv[0]]
+    unittest.main()
+
+if __name__ == '__main__':
+    
+    cmds = { "test" : run_tests,
+             "restore": run_restore, }
+    
+    parser = argparse.ArgumentParser(description='Restore files from Apple Time Machine backup')
+    parser.add_argument('cmd', metavar='DIR', type=str, help='command [ test | restore ]')
+    args = parser.parse_args()
+
+    if (cmds.has_key(args.cmd)):
+        cmds[args.cmd](args)
+    else:
+        print "Available commands: " + str(cmds.keys())
+    #a = ATM()
+    #a.do_walk(args.restore, ShowBackup())
+    
