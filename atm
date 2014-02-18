@@ -38,6 +38,26 @@ class ShowBackup(BackupTraversal):
     def handle_dir(self, src, dst):
         print "d %s -> %s" % (repr(src), repr(dst))
 
+class ComputeSize(BackupTraversal):
+    def __init__(self):
+        self.size = 0
+        self.files = 0
+        self.dirs = 0
+    def handle_file(self, src, dst):
+        self.size += os.stat(src).st_size
+        self.files += 1
+    def handle_dir(self, src, dst):
+        self.dirs += 1
+
+class BackupCounter(object):
+    def __init__(self):
+        self.files = []
+        self.dirs = []
+    def handle_file(self, src, dst):
+        self.files.append(dst)
+    def handle_dir(self, src, dst):
+        self.dirs.append(dst)
+
 class RestoreBackup(BackupTraversal):
     def __init__(self):
         pass
@@ -66,6 +86,9 @@ class ATM(object):
                     break
             lookup = os.path.dirname(lookup)
         return atm
+    
+    # FIXME: should be able to recover only one file
+    # FIXME: should limit the maximum depth
     def do_walk(self, base, handler):
         base = os.path.abspath(base)
         atm = self._find_datadir(base)
@@ -84,8 +107,9 @@ class ATM(object):
                     continue
                 virtpath = os.path.join(entry.virt, item) 
                 realpath = os.path.join(entry.real, item)
-                #print path
                 # handle files
+                if (os.path.islink(realpath)):
+                    continue
                 if (os.path.isfile(realpath)):
                     statinfo = os.stat(realpath)
                     # if the file is empty, may be subdirectory in backup
@@ -100,13 +124,10 @@ class ATM(object):
                     else:
                         handler.handle_file(realpath, virtpath)
                 # handle directories
-                if (os.path.isdir(realpath)):
+                elif os.path.isdir(realpath):
                     e = Entry(realpath, virtpath)
                     queue.insert(0, e)
                     handler.handle_dir(realpath, virtpath)
-
-def run_restore(args):
-    print "restore"
 
 def rm(path, dry=False, verbose=False):
     for root, dirs, files in os.walk(path, topdown=False):
@@ -122,15 +143,6 @@ def rm(path, dry=False, verbose=False):
                 print repr(dir)
             if not dry:
                 os.rmdir(dir)
-
-class BackupCounter(object):
-    def __init__(self):
-        self.files = []
-        self.dirs = []
-    def handle_file(self, src, dst):
-        self.files.append(dst)
-    def handle_dir(self, src, dst):
-        self.dirs.append(dst)
 
 class TestRestore(unittest.TestCase):
     root = "root"
@@ -210,15 +222,37 @@ def run_tests(args):
     sys.argv = [sys.argv[0]]
     unittest.main()
 
+# Source: http://stackoverflow.com/questions/1094841/reusable-library-to-get-human-readable-version-of-file-size
+def sizeof_fmt(num):
+    for x in ['bytes','KB','MB','GB']:
+        if num < 1024.0 and num > -1024.0:
+            return "%3.1f%s" % (num, x)
+        num /= 1024.0
+    return "%3.1f%s" % (num, 'TB')
+
+def run_size(args):
+    print "computing size..."
+    if (args.path is None or not os.path.isdir(args.path)):
+        raise RuntimeError("Backup directory required")
+    a = ATM()
+    visitor = ComputeSize()
+    a.do_walk(args.path, visitor)
+    print "size=%s files=%d dirs=%d" % (sizeof_fmt(visitor.size), visitor.files, visitor.dirs)
+
+def run_restore(args):
+    print "restore"
+
 if __name__ == '__main__':
     
     cmds = { "test" : run_tests,
+             "size" : run_size,
              "restore": run_restore, }
     
     parser = argparse.ArgumentParser(description='Restore files from Apple Time Machine backup')
-    parser.add_argument('cmd', metavar='DIR', type=str, help='command [ test | restore ]')
+    parser.add_argument('cmd', metavar='CMD', type=str, help='command [ test | size | restore ]')
+    parser.add_argument('path', metavar='PATH', type=str, nargs='?')
     args = parser.parse_args()
-
+    
     if (cmds.has_key(args.cmd)):
         cmds[args.cmd](args)
     else:
